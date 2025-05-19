@@ -8623,6 +8623,7 @@ dependencies = [
  "toml_edit",
  "tonic",
  "tower 0.4.13",
+ "tower 0.5.2",
  "tracing",
  "tracing-core",
  "tracing-log",
