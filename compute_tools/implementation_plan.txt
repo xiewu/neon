@@ -1,0 +1,193 @@
+# Implementation Plan for Graceful Termination of PgBouncer and Local Proxy
+
+## Overview
+Add code to terminate pgbouncer and local_proxy when compute_ctl receives a `\terminate` API call, using PID files for both services.
+
+## Current Architecture
+1. `forward_termination_signal()` function in compute.rs:
+   - Terminates sync_safekeepers and PostgreSQL processes
+   - PIDs are tracked in global static variables (SYNC_SAFEKEEPERS_PID, PG_PID)
+
+2. local_proxy:
+   - PID stored in `/etc/local_proxy/pid`
+   - Only sends SIGHUP for configuration reload, not for termination
+
+3. pgbouncer:
+   - Configured through `pg_helpers.rs` -> `tune_pgbouncer()`
+   - No PID file currently configured
+   - Need to add `pidfile = /etc/pgbouncer/pid` to configuration
+
+## Implementation Steps
+
+### Step 1: Update PgBouncer Configuration to use PID File
+Update `tune_pgbouncer` function in `pg_helpers.rs` to always set the pidfile parameter:
+
+```rust
+fn update_pgbouncer_ini(path: &str, options: &IndexMap<String, String>) -> Result<()> {
+    // Existing code...
+    
+    // Ensure the pidfile setting is always set
+    let mut options_with_pidfile = options.clone();
+    options_with_pidfile.insert("pidfile".to_string(), "/etc/pgbouncer/pid".to_string());
+    
+    // Rest of existing function...
+}
+```
+
+### Step 2: Update `forward_termination_signal()` in `compute.rs`
+
+```rust
+pub fn forward_termination_signal() {
+    // Existing code for sync_safekeepers
+    let ss_pid = SYNC_SAFEKEEPERS_PID.load(Ordering::SeqCst);
+    if ss_pid != 0 {
+        let ss_pid = nix::unistd::Pid::from_raw(ss_pid as i32);
+        kill(ss_pid, Signal::SIGTERM).ok();
+    }
+    
+    // Terminate local_proxy
+    match pid_file::read("/etc/local_proxy/pid") {
+        Ok(PidFileRead::LockedByOtherProcess(pid)) => {
+            info!("Sending SIGTERM to local_proxy process (PID: {})", pid);
+            if let Err(e) = kill(pid, Signal::SIGTERM) {
+                error!("Failed to terminate local_proxy: {}", e);
+            }
+        }
+        Ok(PidFileRead::NotHeldByAnyProcess(_)) => {
+            info!("local_proxy PID file exists but process not running");
+        }
+        Ok(PidFileRead::NotExist) => {
+            info!("local_proxy PID file not found, process may not be running");
+        }
+        Err(e) => {
+            error!("Error reading local_proxy PID file: {}", e);
+        }
+    }
+    
+    // Terminate pgbouncer
+    match pid_file::read("/etc/pgbouncer/pid") {
+        Ok(PidFileRead::LockedByOtherProcess(pid)) => {
+            info!("Sending SIGTERM to pgbouncer process (PID: {})", pid);
+            if let Err(e) = kill(pid, Signal::SIGTERM) {
+                error!("Failed to terminate pgbouncer: {}", e);
+            }
+        }
+        Ok(PidFileRead::NotHeldByAnyProcess(_)) => {
+            info!("pgbouncer PID file exists but process not running");
+        }
+        Ok(PidFileRead::NotExist) => {
+            info!("pgbouncer PID file not found, process may not be running");
+        }
+        Err(e) => {
+            error!("Error reading pgbouncer PID file: {}", e);
+        }
+    }
+    
+    // Existing code for postgres
+    let pg_pid = PG_PID.load(Ordering::SeqCst);
+    if pg_pid != 0 {
+        let pg_pid = nix::unistd::Pid::from_raw(pg_pid as i32);
+        // Use 'fast' shutdown (SIGINT) for postgres
+        kill(pg_pid, Signal::SIGINT).ok();
+    }
+}
+```
+
+### Step 3: Update the Terminate Endpoint Handler
+
+Update the log message in `compute_tools/src/http/routes/terminate.rs`:
+
+```rust
+// Change line 51 from:
+info!("terminated Postgres");
+// To:
+info!("terminated Postgres, pgbouncer, and local_proxy");
+```
+
+### Step 4: Ensure PID File Directories Exist
+
+Add code to ensure the directory for the pgbouncer PID file exists:
+
+```rust
+// In tune_pgbouncer function before updating the config
+let pid_dir = std::path::Path::new("/etc/pgbouncer");
+if !pid_dir.exists() {
+    std::fs::create_dir_all(pid_dir)
+        .context("Failed to create directory for pgbouncer PID file")?;
+}
+```
+
+## Fallback Mechanism (Optional)
+
+If for some reason the PID file approach fails (e.g., the pidfile setting is not respected), we could add a fallback mechanism using the `ps` command:
+
+```rust
+fn find_process_pid_by_name(process_name: &str) -> Option<nix::unistd::Pid> {
+    let output = match std::process::Command::new("ps")
+        .args(["-eo", "pid,comm"])
+        .output() {
+            Ok(output) => output,
+            Err(_) => return None,
+        };
+    
+    if !output.status.success() {
+        return None;
+    }
+    
+    let output_str = match String::from_utf8(output.stdout) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+    
+    for line in output_str.lines() {
+        if line.contains(process_name) {
+            if let Some(pid_str) = line.split_whitespace().next() {
+                if let Ok(pid_num) = pid_str.parse::<i32>() {
+                    return Some(nix::unistd::Pid::from_raw(pid_num));
+                }
+            }
+        }
+    }
+    
+    None
+}
+```
+
+This could be used as a backup if the PID file is not available:
+
+```rust
+// In the pgbouncer termination section
+if let Err(e) = pid_file::read("/etc/pgbouncer/pid") {
+    error!("Error reading pgbouncer PID file: {}", e);
+    
+    // Try fallback method
+    if let Some(pid) = find_process_pid_by_name("pgbouncer") {
+        info!("Found pgbouncer process via ps (PID: {})", pid);
+        if let Err(e) = kill(pid, Signal::SIGTERM) {
+            error!("Failed to terminate pgbouncer: {}", e);
+        }
+    }
+}
+```
+
+## Testing Plan
+
+1. Test normal case:
+   - Ensure PID files are correctly created for both services
+   - Send terminate API call
+   - Verify both services are correctly terminated
+
+2. Test edge cases:
+   - Missing PID files
+   - Stale PID files
+   - Services already stopped
+
+3. Test full compute cycle:
+   - Start compute node
+   - Issue a terminate API call
+   - Start compute node again
+   - Ensure no port conflicts or leftover processes
+
+## Impact
+
+This change ensures clean shutdown of all components when a compute is terminated, preventing orphaned processes and potential port conflicts during restarts.
