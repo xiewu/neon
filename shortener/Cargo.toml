@@ -8,6 +8,8 @@ anyhow.workspace = true
 axum-extra = { workspace = true, features = ["cookie", "cookie-private"] }
 axum.workspace = true
 oauth2.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
 regex.workspace = true
 serde.workspace = true
 tokio-postgres.workspace = true

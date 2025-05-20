@@ -1,7 +1,7 @@
 //! Shortener is a service to gate access to internal infrastructure
 //! URLs behind team authorisation to expose less private information.
 use anyhow::{Context, Result};
-use axum::extract::{FromRequestParts, Path, Query, State as AxumState};
+use axum::extract::{FromRef, FromRequestParts, Path, Query, State as AxumState};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{Html, IntoResponse};
@@ -9,13 +9,11 @@ use axum::response::{Redirect, Response};
 use axum::routing::get;
 use axum::{Form, Router};
 use axum_extra::extract::PrivateCookieJar;
-use axum_extra::extract::cookie::Key;
+use axum_extra::extract::cookie::{Cookie, Key};
+use chrono::{Duration, Local};
 use oauth2::basic::BasicClient;
-use oauth2::reqwest;
-use oauth2::{
-    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl,
-    RevocationUrl, Scope, TokenUrl,
-};
+use oauth2::{AuthUrl, AuthorizationCode, ClientId, ClientSecret, TokenUrl};
+use oauth2::{TokenResponse, reqwest};
 use serde::Deserialize;
 use std::env;
 use std::process::exit;
@@ -25,19 +23,30 @@ use tracing::error;
 use utils::logging;
 
 const OAUTH_BASE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
-const GOOGLE_TOKEN_URL: &str = "https://www.googleapis.com/oauth2/v3/token";
-const GOOGLE_TOKEN_REVOKE_URL: &str = "https://oauth2.googleapis.com/revoke";
+const OAUTH_TOKEN_URL: &str = "https://www.googleapis.com/oauth2/v3/token";
+const OAUTH_TOKEN_INFO_URL: &str = "https://www.googleapis.com/oauth2/v3/userinfo";
 
 const HOST: &str = "http://localhost:3000";
-const AUTH_REDIRECT_URL: &str = "http://localhost:3000/auth_callback";
+const AUTHORIZED_ROUTE: &str = "/authorized";
+const AUTH_REDIRECT_URL: &str = "http://localhost:3000/authorized";
+
 const SHORT_URL: &str = "short_url";
 const COOKIE_SID: &str = "sid";
+const COOKIE_DOMAIN: &str = ".app.localhost";
+
+const ALLOWED_OAUTH_DOMAIN: &str = "neon.tech";
 
 struct State {
     db_client: Client,
-    key: Key,
-    oauth_id: String,
+    oauth_client_id: String,
     oauth_client: BasicClient,
+    cookie_jar_key: Key,
+}
+
+impl FromRef<State> for Key {
+    fn from_ref(state: &State) -> Self {
+        state.cookie_jar_key.clone()
+    }
 }
 
 #[tokio::main]
@@ -48,10 +57,20 @@ async fn main() -> Result<()> {
         logging::Output::Stdout,
     )?;
 
-    let client_id =
-        ClientId::new(env::var("GOOGLE_CLIENT_ID").context("Missing GOOGLE_CLIENT_ID")?);
-    let db_connstr = env::var("DB_CONNSTR").context("Missing DB_CONNSTR")?;
+    let oauth_client_id = env::var("OAUTH_CLIENT_ID").context("Missing OAUTH_CLIENT_ID")?;
+    let oauth_client_secret =
+        env::var("OAUTH_CLIENT_SECRET").context("Missing OAUTH_CLIENT_SECRET")?;
+    let auth_url = AuthUrl::new(OAUTH_BASE_URL.to_string()).context("Invalid OAUTH_BASE_URL")?;
+    let token_url =
+        TokenUrl::new(OAUTH_TOKEN_URL.to_string()).context("Invalid OAUTH_TOKEN_URL")?;
+    let oauth_client = BasicClient::new(
+        ClientId::new(oauth_client_id),
+        Some(ClientSecret::new(oauth_client_secret)),
+        auth_url,
+        Some(token_url),
+    );
 
+    let db_connstr = env::var("DB_CONNSTR").context("Missing DB_CONNSTR")?;
     let (db_client, db_conn) = tokio_postgres::connect(&db_connstr, NoTls).await?;
     tokio::spawn(async move {
         if let Err(err) = db_conn.await {
@@ -62,23 +81,35 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(State {
         db_client,
-        key: todo!(),
-        oauth_id: todo!(),
-        oauth_client: todo!(),
+        cookie_jar_key: Key::generate(),
+        oauth_client_id,
+        oauth_client,
     });
 
     let router = Router::new()
-        .route("/auth_callback", get(auth_callback))
+        .route("/authorized", get(authorized))
         .route("/{short_url}", get(redirect))
         .route("/", get(index).post(shorten))
         .with_state(state);
 
+    let listener = tokio::net::TcpListener::bind(HOST)
+        .await
+        .context("failed to bind TcpListener")
+        .unwrap();
+    tracing::info!(
+        "listening on {}",
+        listener
+            .local_addr()
+            .context("failed to return local address")
+            .unwrap()
+    );
+    axum::serve(listener, router).await.unwrap();
     Ok(())
 }
 
 #[derive(Deserialize)]
 pub struct User {
-    id: String,
+    id: i32, // TODO postgres_types::SERIAL ?
 }
 
 impl axum::extract::OptionalFromRequestParts<Arc<State>> for User {
@@ -87,10 +118,10 @@ impl axum::extract::OptionalFromRequestParts<Arc<State>> for User {
         parts: &mut Parts,
         state: &Arc<State>,
     ) -> Result<Option<Self>, Self::Rejection> {
-        let jar: PrivateCookieJar = PrivateCookieJar::from_request_parts(&mut parts, state)
+        let jar: PrivateCookieJar = PrivateCookieJar::from_request_parts(parts, state.as_ref())
             .await
             .unwrap();
-        let Some(cookie) = jar.get("sid").map(|cookie| cookie.value().to_owned()) else {
+        let Some(cookie) = jar.get(COOKIE_SID).map(|cookie| cookie.value().to_owned()) else {
             return Ok(None);
         };
 
@@ -101,18 +132,14 @@ impl axum::extract::OptionalFromRequestParts<Arc<State>> for User {
                 &[&cookie],
             )
             .await;
-        let maybe_row = match query {
-            Ok(maybe_row) => maybe_row,
+        let id = match query {
+            Ok(Some(row)) => row.get::<usize, i32>(0),
+            Ok(None) => return Ok(None),
             Err(err) => {
                 error!(%err, "querying user session");
                 return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
             }
         };
-        if maybe_row.is_none() {
-            return Ok(None);
-        }
-        let row = maybe_row.unwrap();
-        let id = row.get::<usize, &str>(0).to_string();
         Ok(Some(Self { id }))
     }
 }
@@ -139,6 +166,7 @@ fn oauth_url(oauth_client_id: &str, short_url: &str) -> String {
     // %3F is ?, %3D is =
     format!(
         "{OAUTH_BASE_URL}?scope=email&client_id={oauth_client_id}\
+            &hosted_domain=neon.tech\
             &response_type=code&redirect_uri={AUTH_REDIRECT_URL}\
             %3F{SHORT_URL}%3D{short_url}"
     )
@@ -148,7 +176,7 @@ async fn index(state: AxumState<Arc<State>>, user: Option<User>) -> Html<String>
     if user.is_some() {
         shorten_form("")
     } else {
-        let oauth_url = oauth_url(&state.oauth_id, "");
+        let oauth_url = oauth_url(&state.oauth_client_id, "");
         Html(format!("<a href=\"{oauth_url}\">Authorize</a>"))
     }
 }
@@ -191,7 +219,7 @@ async fn redirect(
     Path(short_url): Path<String>,
 ) -> Response {
     if user.is_none() {
-        return Redirect::permanent(&oauth_url(&state.oauth_id, &short_url)).into_response();
+        return Redirect::permanent(&oauth_url(&state.oauth_client_id, &short_url)).into_response();
     };
     let user_id = user.unwrap().id;
 
@@ -218,101 +246,96 @@ struct AuthRequest {
     short_url: Option<String>,
 }
 
-async fn auth_callback(
+#[derive(Deserialize)]
+struct AuthResponse {
+    hd: String,
+    sub: String,
+}
+
+// TODO csrf, pkce
+async fn authorized(
     state: AxumState<Arc<State>>,
     jar: PrivateCookieJar,
     Query(AuthRequest { code, short_url }): Query<AuthRequest>,
-) -> Result<Response, Response> {
+) -> Result<(PrivateCookieJar, Redirect), Response> {
     let token = state
         .oauth_client
         .exchange_code(AuthorizationCode::new(code))
         .request_async(reqwest::async_http_client)
-        .await?;
+        .await
+        .map_err(|err| {
+            error!(%err, "exchanging oauth code for token");
+            StatusCode::UNAUTHORIZED.into_response()
+        })?;
+    let secret = token.access_token().secret();
+
+    let AuthResponse { hd, sub } = ::reqwest::Client::new()
+        .get(OAUTH_TOKEN_INFO_URL)
+        .bearer_auth(secret)
+        .send()
+        .await
+        .map_err(|err| {
+            error!(%err, "getting user id with token");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?
+        .json()
+        .await
+        .map_err(|err| {
+            error!(%err, "deserializing response with used id");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+    if hd != ALLOWED_OAUTH_DOMAIN {
+        error!(%hd, "Domain doesn't match allowed {ALLOWED_OAUTH_DOMAIN}");
+        return Err(StatusCode::UNAUTHORIZED.into_response());
+    }
 
     let Some(secs) = token.expires_in() else {
-        return Err(ApiError::OptionError);
+        error!("Token doesn't include expiration time, rejecting");
+        return Err(StatusCode::UNAUTHORIZED.into_response());
     };
-    let secs: i64 = secs.as_secs().try_into()?;
-    let max_age = Local::now().naive_local() + Duration::try_seconds(secs).unwrap();
-
-    let cookie = Cookie::build((COOKIE_SID, token.access_token().secret().to_owned()))
-        .domain(".app.localhost")
+    let cookie = Cookie::build((COOKIE_SID, secret))
+        .domain(COOKIE_DOMAIN)
         .path("/")
         .secure(true)
         .http_only(true)
-        .max_age(TimeDuration::seconds(secs));
+        .max_age(secs);
 
-    let user_id_row = state.db_client.query_one(
-        "INSERT INTO users (email) VALUES ($1) \
-         ON CONFLICT (email) DO NOTHING \
-         RETURNING user_id", &[&email])
+    let user_id_row = state
+        .db_client
+        .query_one(
+            "INSERT INTO users (sub) VALUES ($1) \
+         ON CONFLICT (sub) DO NOTHING \
+         RETURNING user_id",
+            &[&sub],
+        )
         .await
         .map_err(|err| {
-            error!(%err, %email, "inserting or querying user");
+            error!(%err, %sub, "inserting or querying user");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        })
-        ?;
-    let user_id: u64 = user_id_row.get(0);
+        })?;
+    let user_id: i32 = user_id_row.get(0);
 
-    state.db_client.query_opt(
-        "INSERT INTO sessions (user_id, session_id, expires_at) VALUES (
-        ($1, $2, $3)
-        ON CONFLICT (user_id) DO UPDATE SET
-        session_id = excluded.session_id,
-        expires_at = excluded.expires_at",
-        &[&user_id, token.access_token.secret(), &max_age]
-    )
-    .await?;
+    let expires_at =
+        Local::now().naive_local() + Duration::try_seconds(secs.as_secs() as i64).unwrap();
+    state
+        .db_client
+        .query_opt(
+            "INSERT INTO sessions (user_id, session_id, expires_at) VALUES ($1, $2, $3) \
+            ON CONFLICT (user_id) DO UPDATE SET \
+            session_id = excluded.session_id,\
+            expires_at = excluded.expires_at",
+            &[&user_id, token.access_token().secret(), &expires_at],
+        )
+        .await
+        .map_err(|err| {
+            error!(%err, %user_id, "updating session info");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        })?;
 
     // we can save one redirect for user by redirecting not to /short_url,
     // but to queried long url directly
-    Ok((jar.add(cookie), Redirect::to(&format!("/{}", short_url.unwrap_or_default()))))
-}
-
-async fn main2() -> Result<()> {
-    let client_id =
-        ClientId::new(env::var("GOOGLE_CLIENT_ID").context("Missing GOOGLE_CLIENT_ID")?);
-    let client_secret = ClientSecret::new(
-        env::var("GOOGLE_CLIENT_SECRET").context("Missing GOOGLE_CLIENT_SECRET")?,
-    );
-
-    let auth_url =
-        AuthUrl::new(OAUTH_BASE_URL.to_string()).context("Invalid authorization endpoint URL")?;
-    let token_url =
-        TokenUrl::new(GOOGLE_TOKEN_URL.to_string()).context("Invalid token endpoint URL")?;
-    let redirect_url =
-        RedirectUrl::new(AUTH_REDIRECT_URL.to_string()).expect("Invalid redirect URL");
-    let revocation_url = RevocationUrl::new(GOOGLE_TOKEN_REVOKE_URL.to_string())
-        .expect("Invalid revocation endpoint URL");
-
-    let client = BasicClient::new(client_id, Some(client_secret), auth_url, Some(token_url))
-        .set_redirect_uri(redirect_url)
-        .set_revocation_uri(revocation_url);
-
-    let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-    let (auth_url, csrf_token) = client
-        .authorize_url(CsrfToken::new_random)
-        .add_scope(Scope::new("email".to_string()))
-        .set_pkce_challenge(pkce_challenge)
-        .add_extra_param("hosted_domain", "neon.tech")
-        .url();
-
-    println!("Browse to: {}", auth_url);
-    let http_client = reqwest::ClientBuilder::new()
-        // Following redirects opens the client up to SSRF vulnerabilities.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("Client should build");
-
-    let token_result = client
-        .exchange_code(AuthorizationCode::new(
-            "some authorization code".to_string(),
-        ))
-        // Set the PKCE code verifier.
-        .set_pkce_verifier(pkce_verifier)
-        .request_async(&http_client)
-        .await?;
-    println!("Google returned the following token:\n{token_result}\n");
-
-    Ok(())
+    Ok((
+        jar.add(cookie),
+        Redirect::to(&format!("/{}", short_url.unwrap_or_default())),
+    ))
 }
