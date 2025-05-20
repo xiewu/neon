@@ -13,3 +13,6 @@ serde.workspace = true
 tokio-postgres.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+nanoid.workspace = true
+utils.workspace = true
+workspace_hack.workspace = true

@@ -133,6 +133,7 @@ memoffset = "0.9"
 nix = { version = "0.30.1", features = ["dir", "fs", "mman", "process", "socket", "signal", "poll"] }
 # Do not update to >= 7.0.0, at least. The update will have a significant impact
 # on compute startup metrics (start_postgres_ms), >= 25% degradation.
+nanoid = "0.4.0"
 notify = "6.0.0"
 num_cpus = "1.15"
 num-traits = "0.2.19"

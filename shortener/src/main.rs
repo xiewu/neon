@@ -1,11 +1,11 @@
 //! Shortener is a service to gate access to internal infrastructure
 //! URLs behind team authorisation to expose less private information.
 use anyhow::{Context, Result};
-use axum::extract::{FromRequestParts, Request, State as AxumState};
+use axum::extract::{FromRequestParts, Path, Query, State as AxumState};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
-use axum::response::Response;
 use axum::response::{Html, IntoResponse};
+use axum::response::{Redirect, Response};
 use axum::routing::get;
 use axum::{Form, Router};
 use axum_extra::extract::PrivateCookieJar;
@@ -18,17 +18,20 @@ use oauth2::{
 };
 use serde::Deserialize;
 use std::env;
+use std::process::exit;
 use std::sync::Arc;
-use tokio_postgres::{Client, Config, Connection, NoTls, Socket};
+use tokio_postgres::{Client, NoTls};
 use tracing::error;
+use utils::logging;
 
-const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+const OAUTH_BASE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://www.googleapis.com/oauth2/v3/token";
 const GOOGLE_TOKEN_REVOKE_URL: &str = "https://oauth2.googleapis.com/revoke";
 
 const HOST: &str = "http://localhost:3000";
 const AUTH_REDIRECT_URL: &str = "http://localhost:3000/auth_callback";
-// + nanoid
+const SHORT_URL: &str = "short_url";
+const COOKIE_SID: &str = "sid";
 
 struct State {
     db_client: Client,
@@ -39,6 +42,12 @@ struct State {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    logging::init(
+        logging::LogFormat::Plain,
+        logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
+        logging::Output::Stdout,
+    )?;
+
     let client_id =
         ClientId::new(env::var("GOOGLE_CLIENT_ID").context("Missing GOOGLE_CLIENT_ID")?);
     let db_connstr = env::var("DB_CONNSTR").context("Missing DB_CONNSTR")?;
@@ -47,6 +56,7 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         if let Err(err) = db_conn.await {
             error!(%err, "connecting to database");
+            exit(1);
         }
     });
 
@@ -59,7 +69,7 @@ async fn main() -> Result<()> {
 
     let router = Router::new()
         .route("/auth_callback", get(auth_callback))
-        .route("/{id}", get(redirect))
+        .route("/{short_url}", get(redirect))
         .route("/", get(index).post(shorten))
         .with_state(state);
 
@@ -122,14 +132,24 @@ fn shorten_form(short_url: &str) -> Html<String> {
     ))
 }
 
+fn oauth_url(oauth_client_id: &str, short_url: &str) -> String {
+    // If we follow short link unauthorized, we want to redirect to Oauth page, then to our
+    // auth callback, and then to the target url. For that we need to pass a ?SHORT_URL=
+    // parameter to our auth callback, and we need to encode it in Oauth page url.
+    // %3F is ?, %3D is =
+    format!(
+        "{OAUTH_BASE_URL}?scope=email&client_id={oauth_client_id}\
+            &response_type=code&redirect_uri={AUTH_REDIRECT_URL}\
+            %3F{SHORT_URL}%3D{short_url}"
+    )
+}
+
 async fn index(state: AxumState<Arc<State>>, user: Option<User>) -> Html<String> {
-    match user {
-        None => Html(format!(
-            "<a href=\"{GOOGLE_AUTH_URL}?scope=email&client_id={}\
-            &response_type=code&redirect_uri={AUTH_REDIRECT_URL}\">Authorize</a>",
-            state.oauth_id
-        )),
-        Some(_) => shorten_form(""),
+    if user.is_some() {
+        shorten_form("")
+    } else {
+        let oauth_url = oauth_url(&state.oauth_id, "");
+        Html(format!("<a href=\"{oauth_url}\">Authorize</a>"))
     }
 }
 
@@ -142,6 +162,7 @@ async fn shorten(
         None => return StatusCode::FORBIDDEN.into_response(),
         Some(user) => user.id,
     };
+    let short_url = nanoid::nanoid!(6);
 
     let query = state
         .db_client
@@ -150,7 +171,7 @@ async fn shorten(
              VALUES ($1, $2, $3) \
              ON CONFLICT (long_url) DO NOTHING \
              RETURNING short_url",
-            &[&user_id, &generated_short_url, &url],
+            &[&user_id, &short_url, &url],
         )
         .await;
     let row = match query {
@@ -160,6 +181,92 @@ async fn shorten(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
+    let short_url: &str = row.get(0);
+    shorten_form(&format!("{HOST}/{short_url}")).into_response()
+}
+
+async fn redirect(
+    state: AxumState<Arc<State>>,
+    user: Option<User>,
+    Path(short_url): Path<String>,
+) -> Response {
+    if user.is_none() {
+        return Redirect::permanent(&oauth_url(&state.oauth_id, &short_url)).into_response();
+    };
+    let user_id = user.unwrap().id;
+
+    let query = state
+        .db_client
+        .query_one(
+            "FROM urls SELECT long_url WHERE short_url = $1",
+            &[&short_url],
+        )
+        .await;
+    let row = match query {
+        Ok(row) => row,
+        Err(err) => {
+            error!(%err, %short_url, %user_id, "querying long url");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    Redirect::permanent(row.get(0)).into_response()
+}
+
+#[derive(Deserialize)]
+struct AuthRequest {
+    code: String,
+    short_url: Option<String>,
+}
+
+async fn auth_callback(
+    state: AxumState<Arc<State>>,
+    jar: PrivateCookieJar,
+    Query(AuthRequest { code, short_url }): Query<AuthRequest>,
+) -> Result<Response, Response> {
+    let token = state
+        .oauth_client
+        .exchange_code(AuthorizationCode::new(code))
+        .request_async(reqwest::async_http_client)
+        .await?;
+
+    let Some(secs) = token.expires_in() else {
+        return Err(ApiError::OptionError);
+    };
+    let secs: i64 = secs.as_secs().try_into()?;
+    let max_age = Local::now().naive_local() + Duration::try_seconds(secs).unwrap();
+
+    let cookie = Cookie::build((COOKIE_SID, token.access_token().secret().to_owned()))
+        .domain(".app.localhost")
+        .path("/")
+        .secure(true)
+        .http_only(true)
+        .max_age(TimeDuration::seconds(secs));
+
+    let user_id_row = state.db_client.query_one(
+        "INSERT INTO users (email) VALUES ($1) \
+         ON CONFLICT (email) DO NOTHING \
+         RETURNING user_id", &[&email])
+        .await
+        .map_err(|err| {
+            error!(%err, %email, "inserting or querying user");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        })
+        ?;
+    let user_id: u64 = user_id_row.get(0);
+
+    state.db_client.query_opt(
+        "INSERT INTO sessions (user_id, session_id, expires_at) VALUES (
+        ($1, $2, $3)
+        ON CONFLICT (user_id) DO UPDATE SET
+        session_id = excluded.session_id,
+        expires_at = excluded.expires_at",
+        &[&user_id, token.access_token.secret(), &max_age]
+    )
+    .await?;
+
+    // we can save one redirect for user by redirecting not to /short_url,
+    // but to queried long url directly
+    Ok((jar.add(cookie), Redirect::to(&format!("/{}", short_url.unwrap_or_default()))))
 }
 
 async fn main2() -> Result<()> {
@@ -170,7 +277,7 @@ async fn main2() -> Result<()> {
     );
 
     let auth_url =
-        AuthUrl::new(GOOGLE_AUTH_URL.to_string()).context("Invalid authorization endpoint URL")?;
+        AuthUrl::new(OAUTH_BASE_URL.to_string()).context("Invalid authorization endpoint URL")?;
     let token_url =
         TokenUrl::new(GOOGLE_TOKEN_URL.to_string()).context("Invalid token endpoint URL")?;
     let redirect_url =
