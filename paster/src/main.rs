@@ -161,7 +161,7 @@ fn paste_form() -> Html<String> {
     Html(
         r#"
             <form method="post">
-                <input type="textarea" name="paste" style="width:100%;height:80%">
+                <textarea name="paste" style="width:100%;height:80%"></textarea>
                 <input type="submit" value="Paste" style="margin-top:10px">
             </form>"#
             .to_string(),
@@ -227,8 +227,7 @@ async fn view_paste(state: AxumState, user: Option<UserId>, Path(paste_id): Path
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-
-    Html(row.get::<usize, String>(0)).into_response()
+    row.get::<usize, String>(0).into_response()
 }
 
 #[derive(Deserialize)]
