@@ -17,7 +17,7 @@ use oauth2::{AuthUrl, ClientId, ClientSecret, CsrfToken, RedirectUrl, Scope, Tok
 use serde::Deserialize;
 use std::env;
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 use utils::logging;
 
 const OAUTH_BASE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -29,8 +29,10 @@ const AUTHORIZED_ROUTE: &str = "/authorized";
 const AUTH_REDIRECT_URL: &str = "http://127.0.0.1:12344/authorized";
 
 const COOKIE_SID: &str = "sid";
-const COOKIE_DOMAIN: &str = ".app.localhost";
+const COOKIE_REDIRECT: &str = "redirect";
+const COOKIE_CSRF: &str = "csrf";
 
+const ALLOWED_COOKIE_DOMAIN: &str = ".app.localhost";
 const ALLOWED_OAUTH_DOMAIN: &str = "neon.tech";
 
 struct AppState {
@@ -82,9 +84,6 @@ async fn main() -> Result<()> {
     )
     .set_redirect_uri(redirect_url);
     info!("initialized oauth client");
-    debug!(redirect_url = AUTH_REDIRECT_URL);
-    debug!(base_url = OAUTH_BASE_URL);
-    debug!(token_url = OAUTH_TOKEN_URL);
 
     let db_connstr = env::var("DB_CONNSTR").expect("Missing DB_CONNSTR");
     let mut roots = rustls::RootCertStore::empty();
@@ -241,7 +240,7 @@ async fn shorten(
         match query {
             Ok(Some(_)) => break,
             Ok(None) => {
-                debug!(short_url, "url clash, retry {i}");
+                info!(short_url, "url clash, retry {i}");
                 continue;
             }
             Err(err) => {
@@ -262,7 +261,6 @@ async fn redirect(
         None => return Html(authorize_link(&short_url)).into_response(),
         Some(user) => user.id,
     };
-    debug!(user_id, short_url, "requested redirect");
 
     let query = state
         .state
@@ -287,7 +285,6 @@ async fn redirect(
 #[derive(Deserialize)]
 struct AuthRequest {
     code: String,
-    state: String,
 }
 
 #[derive(Deserialize)]
@@ -317,33 +314,44 @@ struct AuthorizeQuery {
 
 async fn authorize(
     state: AxumState<State>,
-    //jar: PrivateCookieJar,
+    jar: PrivateCookieJar,
     Query(AuthorizeQuery { short_url }): Query<AuthorizeQuery>,
-) -> Redirect {
-    //let (pkce_challenge, pkce_verifier) = oauth2::PkceCodeChallenge::new_random_sha256();
-
-    let (auth_url, _) = state
+) -> (PrivateCookieJar, Redirect) {
+    let (auth_url, csrf_token) = state
         .state
         .oauth_client
-        .authorize_url(|| CsrfToken::new(short_url))
+        .authorize_url(CsrfToken::new_random)
         .add_scope(Scope::new(
             "https://www.googleapis.com/auth/userinfo.email".to_string(),
         ))
-        //.set_pkce_challenge(pkce_challenge)
         .url();
-    let url = &Into::<String>::into(auth_url);
-    debug!(url, "redirecting to auth endpoint");
-    Redirect::to(url)
+
+    let redirect_cookie = Cookie::build((COOKIE_REDIRECT, short_url))
+        .path("/")
+        //.TODO secure(true) not true for localhost
+        //.domain(COOKIE_DOMAIN)
+        .secure(false)
+        .same_site(axum_extra::extract::cookie::SameSite::Lax)
+        .http_only(true)
+        .build();
+    let csrf_cookie = Cookie::build((COOKIE_CSRF, csrf_token.secret().to_string()))
+        .path("/")
+        //.TODO secure(true) not true for localhost
+        //.domain(COOKIE_DOMAIN)
+        .secure(false)
+        .same_site(axum_extra::extract::cookie::SameSite::Lax)
+        .http_only(true)
+        .build();
+    let jar = jar.add(redirect_cookie).add(csrf_cookie);
+    let url = Into::<String>::into(auth_url);
+    (jar, Redirect::to(&url))
 }
 
-// TODO pkce
 async fn authorized(
     state: AxumState<State>,
     jar: PrivateCookieJar,
     Query(auth_request): Query<AuthRequest>,
 ) -> Result<(PrivateCookieJar, Redirect), Response> {
-    debug!(code = auth_request.code, "got authorization code");
-
     let params = [
         ("grant_type", "authorization_code"),
         ("redirect_uri", AUTH_REDIRECT_URL),
@@ -374,15 +382,14 @@ async fn authorized(
         error!(hd, "Domain doesn't match {ALLOWED_OAUTH_DOMAIN}");
         return Err(StatusCode::UNAUTHORIZED.into_response());
     }
-    debug!(%sub, "authorized user");
 
     let token_duration = Duration::try_seconds(auth_response.expires_in as i64).unwrap();
     let expires_at = Utc.from_utc_datetime(&(Local::now().naive_local() + token_duration));
     let cookie_max_age = time::Duration::new(token_duration.num_seconds(), 0);
 
-    let cookie = Cookie::build((COOKIE_SID, auth_response.access_token.clone()))
+    let session_cookie = Cookie::build((COOKIE_SID, auth_response.access_token.clone()))
         .path("/")
-        //.secure(true) not true for localhost
+        //.TODO secure(true) not true for localhost
         //.domain(COOKIE_DOMAIN)
         .secure(false)
         .same_site(axum_extra::extract::cookie::SameSite::Lax)
@@ -410,13 +417,13 @@ async fn authorized(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         })?;
 
-    let state_decoded = decode_config(auth_request.state, base64::URL_SAFE_NO_PAD);
-    let mut redirect = str::from_utf8(&state_decoded.unwrap_or_default())
-        .unwrap_or("/")
-        .to_string();
-    if redirect.is_empty() {
-        redirect = "/".to_string();
+    let csrf_cookie = jar.get(COOKIE_CSRF).unwrap(); // set in authorize()
+    let jar = jar.remove(csrf_cookie).add(session_cookie);
+    match jar.get(COOKIE_REDIRECT) {
+        Some(redirect_cookie) => {
+            let redirect_url = format!("/{}", redirect_cookie.value_trimmed());
+            Ok((jar.remove(redirect_cookie), Redirect::to(&redirect_url)))
+        }
+        None => Ok((jar, Redirect::to("/"))),
     }
-
-    Ok((jar.add(cookie), Redirect::to(&redirect)))
 }
