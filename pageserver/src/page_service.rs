@@ -205,10 +205,10 @@ pub fn spawn_grpc(
 
     // Main page service.
     let page_service = proto::PageServiceServer::new(PageServerHandler::new(
-        conf,
         tenant_manager,
         auth,
         PageServicePipeliningConfig::Serial, // TODO: unused with gRPC
+        conf.get_vectored_concurrent_io,
         ConnectionPerfSpanFields::default(),
         ctx,
         cancel.clone(),
