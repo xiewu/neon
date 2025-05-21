@@ -14,6 +14,7 @@ members = [
     "safekeeper",
     "safekeeper/client",
     "shortener",
+    "paster",
     "storage_broker",
     "storage_controller",
     "storage_controller/client",

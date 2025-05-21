@@ -4664,6 +4664,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de3145af08024dea9fa9914f381a17b8fc6034dfb00f3a84013f7ff43f29ed4c"
 
 [[package]]
+name = "paster"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-extra",
+ "base64 0.13.1",
+ "chrono",
+ "nanoid",
+ "rand 0.8.5",
+ "reqwest",
+ "rustls 0.23.18",
+ "rustls-native-certs 0.8.0",
+ "serde",
+ "serde_json",
+ "time",
+ "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
+ "tracing",
+ "tracing-subscriber",
+ "workspace_hack",
+]
+
+[[package]]
 name = "pbkdf2"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
