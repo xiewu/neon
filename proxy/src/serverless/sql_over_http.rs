@@ -1017,7 +1017,7 @@ impl BatchQueryData {
 
             match select(query, pin!(cancel.cancelled())).await {
                 // TODO: maybe we should check that the transaction bit is set here
-                Either::Left((Ok(_), _cancelled)) => continue,
+                Either::Left((Ok(_), _cancelled)) => {}
                 Either::Left((Err(e), _cancelled)) => break 'tx Err(e),
                 Either::Right((_cancelled, _)) => {
                     if let Err(err) = cancel_token.cancel_query(NoTls).await {

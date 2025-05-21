@@ -321,7 +321,6 @@ mod tests {
     fn pg_text_to_json(val: &str, pg_type: &Type) -> Value {
         let mut buf = vec![];
         super::pg_text_to_json(ValueSer::new(&mut buf), val, pg_type).unwrap();
-        dbg!(String::from_utf8_lossy(&buf));
         serde_json::from_slice(&buf).unwrap()
     }
 
@@ -330,7 +329,6 @@ mod tests {
         let mut list = ValueSer::new(&mut buf).list();
         super::pg_array_parse(&mut list, pg_array, pg_type).unwrap();
         list.finish();
-        dbg!(String::from_utf8_lossy(&buf));
         serde_json::from_slice(&buf).unwrap()
     }
 
