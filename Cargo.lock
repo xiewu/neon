@@ -820,7 +820,7 @@ dependencies = [
  "pin-project",
  "quick-xml 0.31.0",
  "rand 0.8.5",
- "reqwest 0.12.4",
+ "reqwest",
  "rustc_version",
  "serde",
  "serde_json",
@@ -1369,7 +1369,7 @@ dependencies = [
  "postgres_initdb",
  "regex",
  "remote_storage",
- "reqwest 0.12.4",
+ "reqwest",
  "ring",
  "rlimit",
  "rust-ini",
@@ -1489,7 +1489,7 @@ dependencies = [
  "postgres_backend",
  "postgres_connection",
  "regex",
- "reqwest 0.12.4",
+ "reqwest",
  "safekeeper_api",
  "scopeguard",
  "serde",
@@ -2114,15 +2114,6 @@ dependencies = [
  "serdect",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "encoding_rs"
-version = "0.8.35"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
-dependencies = [
- "cfg-if",
 ]
 
 [[package]]
@@ -4135,7 +4126,6 @@ dependencies = [
  "getrandom 0.2.11",
  "http 0.2.9",
  "rand 0.8.5",
- "reqwest 0.11.27",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -4201,7 +4191,7 @@ dependencies = [
  "bytes",
  "http 1.1.0",
  "opentelemetry",
- "reqwest 0.12.4",
+ "reqwest",
 ]
 
 [[package]]
@@ -4218,7 +4208,7 @@ dependencies = [
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "prost 0.13.3",
- "reqwest 0.12.4",
+ "reqwest",
  "thiserror 1.0.69",
 ]
 
@@ -4344,7 +4334,7 @@ dependencies = [
  "pageserver_api",
  "pageserver_client",
  "rand 0.8.5",
- "reqwest 0.12.4",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
@@ -4434,7 +4424,7 @@ dependencies = [
  "range-set-blaze",
  "regex",
  "remote_storage",
- "reqwest 0.12.4",
+ "reqwest",
  "rpds",
  "rstest",
  "rustls 0.23.18",
@@ -4494,7 +4484,7 @@ dependencies = [
  "postgres_ffi",
  "rand 0.8.5",
  "remote_storage",
- "reqwest 0.12.4",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_with",
@@ -4515,7 +4505,7 @@ dependencies = [
  "futures",
  "http-utils",
  "pageserver_api",
- "reqwest 0.12.4",
+ "reqwest",
  "serde",
  "thiserror 1.0.69",
  "tokio",
@@ -5008,7 +4998,7 @@ name = "posthog_client_lite"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "reqwest 0.12.4",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
@@ -5332,7 +5322,7 @@ dependencies = [
  "redis",
  "regex",
  "remote_storage",
- "reqwest 0.12.4",
+ "reqwest",
  "reqwest-middleware",
  "reqwest-retry",
  "reqwest-tracing",
@@ -5704,7 +5694,7 @@ dependencies = [
  "once_cell",
  "pin-project-lite",
  "rand 0.8.5",
- "reqwest 0.12.4",
+ "reqwest",
  "scopeguard",
  "serde",
  "serde_json",
@@ -5723,42 +5713,6 @@ name = "replace_with"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a8614ee435691de62bcffcf4a66d91b3594bf1428a5722e79103249a095690"
-
-[[package]]
-name = "reqwest"
-version = "0.11.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd67538700a17451e7cba03ac727fb961abb7607553461627b97de0b89cf4a62"
-dependencies = [
- "base64 0.21.7",
- "bytes",
- "encoding_rs",
- "futures-core",
- "futures-util",
- "h2 0.3.26",
- "http 0.2.9",
- "http-body 0.4.5",
- "hyper 0.14.30",
- "ipnet",
- "js-sys",
- "log",
- "mime",
- "once_cell",
- "percent-encoding",
- "pin-project-lite",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sync_wrapper 0.1.2",
- "system-configuration",
- "tokio",
- "tower-service",
- "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "winreg 0.50.0",
-]
 
 [[package]]
 name = "reqwest"
@@ -5802,7 +5756,7 @@ dependencies = [
  "wasm-streams",
  "web-sys",
  "webpki-roots",
- "winreg 0.52.0",
+ "winreg",
 ]
 
 [[package]]
@@ -5814,7 +5768,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "http 1.1.0",
- "reqwest 0.12.4",
+ "reqwest",
  "serde",
  "thiserror 1.0.69",
  "tower-service",
@@ -5833,7 +5787,7 @@ dependencies = [
  "http 1.1.0",
  "hyper 1.4.1",
  "parking_lot 0.11.2",
- "reqwest 0.12.4",
+ "reqwest",
  "reqwest-middleware",
  "retry-policies",
  "thiserror 1.0.69",
@@ -5854,7 +5808,7 @@ dependencies = [
  "http 1.1.0",
  "matchit",
  "opentelemetry",
- "reqwest 0.12.4",
+ "reqwest",
  "reqwest-middleware",
  "tracing",
  "tracing-opentelemetry",
@@ -6218,7 +6172,7 @@ dependencies = [
  "rand 0.8.5",
  "regex",
  "remote_storage",
- "reqwest 0.12.4",
+ "reqwest",
  "rustls 0.23.18",
  "safekeeper_api",
  "safekeeper_client",
@@ -6269,7 +6223,7 @@ name = "safekeeper_client"
 version = "0.1.0"
 dependencies = [
  "http-utils",
- "reqwest 0.12.4",
+ "reqwest",
  "safekeeper_api",
  "serde",
  "thiserror 1.0.69",
@@ -6407,7 +6361,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "255914a8e53822abd946e2ce8baa41d4cded6b8e938913b7f7b9da5b7ab44335"
 dependencies = [
  "httpdate",
- "reqwest 0.12.4",
+ "reqwest",
  "rustls 0.23.18",
  "sentry-backtrace",
  "sentry-contexts",
@@ -6688,8 +6642,8 @@ dependencies = [
  "base64 0.13.1",
  "chrono",
  "nanoid",
- "oauth2",
- "reqwest 0.12.4",
+ "rand 0.8.5",
+ "reqwest",
  "rustls 0.23.18",
  "rustls-native-certs 0.8.0",
  "serde",
@@ -6699,7 +6653,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-postgres-rustls",
  "tracing",
- "utils",
+ "tracing-subscriber",
  "workspace_hack",
 ]
 
@@ -6906,7 +6860,7 @@ dependencies = [
  "postgres_connection",
  "rand 0.8.5",
  "regex",
- "reqwest 0.12.4",
+ "reqwest",
  "routerify",
  "rustls 0.23.18",
  "rustls-native-certs 0.8.0",
@@ -6935,7 +6889,7 @@ name = "storage_controller_client"
 version = "0.1.0"
 dependencies = [
  "pageserver_client",
- "reqwest 0.12.4",
+ "reqwest",
  "serde",
  "workspace_hack",
 ]
@@ -6960,7 +6914,7 @@ dependencies = [
  "pageserver_api",
  "postgres_ffi",
  "remote_storage",
- "reqwest 0.12.4",
+ "reqwest",
  "rustls 0.23.18",
  "rustls-native-certs 0.8.0",
  "serde",
@@ -6989,7 +6943,7 @@ dependencies = [
  "humantime",
  "pageserver_api",
  "pageserver_client",
- "reqwest 0.12.4",
+ "reqwest",
  "serde_json",
  "storage_controller_client",
  "tokio",
@@ -7141,27 +7095,6 @@ dependencies = [
  "once_cell",
  "rayon",
  "winapi",
-]
-
-[[package]]
-name = "system-configuration"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba3a3adc5c275d719af8cb4272ea1c4a6d668a777f37e115f6d11ddbc1c8e0e7"
-dependencies = [
- "bitflags 1.3.2",
- "core-foundation",
- "system-configuration-sys",
-]
-
-[[package]]
-name = "system-configuration-sys"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a75fb188eb626b924683e3b95e3a48e63551fcfb51949de2f06a9d91dbee93c9"
-dependencies = [
- "core-foundation-sys",
- "libc",
 ]
 
 [[package]]
@@ -8662,16 +8595,6 @@ dependencies = [
 
 [[package]]
 name = "winreg"
-version = "0.50.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "524e57b2c537c0f9b1e69f1965311ec12182b4122e45035b1508cd24d2adadb1"
-dependencies = [
- "cfg-if",
- "windows-sys 0.48.0",
-]
-
-[[package]]
-name = "winreg"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a277a57398d4bfa075df44f501a17cfdf8542d224f0d36095a2adc7aee4ef0a5"
@@ -8687,6 +8610,8 @@ dependencies = [
  "ahash",
  "anstream",
  "anyhow",
+ "axum",
+ "axum-extra",
  "base64 0.13.1",
  "base64 0.21.7",
  "base64ct",
@@ -8698,6 +8623,7 @@ dependencies = [
  "clap_builder",
  "const-oid",
  "crypto-bigint 0.5.5",
+ "crypto-common",
  "der 0.7.8",
  "deranged",
  "digest",
@@ -8752,7 +8678,7 @@ dependencies = [
  "regex",
  "regex-automata 0.4.3",
  "regex-syntax 0.8.2",
- "reqwest 0.12.4",
+ "reqwest",
  "rustls 0.23.18",
  "rustls-pki-types",
  "rustls-webpki 0.102.8",
@@ -8779,6 +8705,7 @@ dependencies = [
  "toml_edit",
  "tonic",
  "tower 0.4.13",
+ "tower 0.5.2",
  "tracing",
  "tracing-core",
  "tracing-log",

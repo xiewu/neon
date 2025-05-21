@@ -2,88 +2,75 @@
 //! URLs behind team authorisation to expose less private information.
 use anyhow::Result;
 use axum::Form;
-use axum::extract::{FromRef, FromRequestParts, Path, Query, State as AxumState};
+use axum::extract::{FromRef, FromRequestParts, Path, Query, State as AxumStateT};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
 use axum::response::{Redirect, Response};
 use axum::routing::get;
 use axum_extra::extract::PrivateCookieJar;
 use axum_extra::extract::cookie::{Cookie, Key};
-use base64::decode_config;
 use chrono::{Duration, Local, TimeZone, Utc};
 use core::num::NonZeroI32;
-use oauth2::basic::BasicClient;
-use oauth2::{AuthUrl, ClientId, ClientSecret, CsrfToken, RedirectUrl, Scope, TokenUrl};
 use serde::Deserialize;
 use std::env;
 use std::sync::Arc;
 use tracing::{error, info};
-use utils::logging;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 const OAUTH_BASE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-
 const SOCKET: &str = "127.0.0.1:12344";
 const HOST: &str = "http://127.0.0.1:12344";
 const AUTHORIZED_ROUTE: &str = "/authorized";
-const AUTH_REDIRECT_URL: &str = "http://127.0.0.1:12344/authorized";
-
 const COOKIE_SID: &str = "sid";
 const COOKIE_REDIRECT: &str = "redirect";
 const COOKIE_CSRF: &str = "csrf";
-
 const ALLOWED_COOKIE_DOMAIN: &str = ".app.localhost";
 const ALLOWED_OAUTH_DOMAIN: &str = "neon.tech";
+const SHORT_URL_LEN: usize = 6;
 
-struct AppState {
-    db_client: tokio_postgres::Client,
-    oauth_client: BasicClient,
+struct InnerState {
     oauth_client_id: String,
     oauth_client_secret: String,
     cookie_jar_key: Key,
+    db_client: tokio_postgres::Client,
 }
 
-// ugly but we need separate type to impl FromRef
 #[derive(Clone)]
-struct State {
-    state: Arc<AppState>,
+struct State(Arc<InnerState>);
+type AxumState = AxumStateT<State>;
+
+impl std::ops::Deref for State {
+    type Target = InnerState;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
 }
 
 impl FromRef<State> for Key {
     fn from_ref(state: &State) -> Self {
-        state.state.cookie_jar_key.clone()
-    }
-}
-
-impl FromRef<AppState> for Key {
-    fn from_ref(state: &AppState) -> Self {
         state.cookie_jar_key.clone()
     }
 }
 
+fn oauth_redirect_url() -> String {
+    format!("{HOST}{AUTHORIZED_ROUTE}")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    logging::init(
-        logging::LogFormat::Plain,
-        logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
-        logging::Output::Stdout,
-    )?;
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| format!("{}=info", env!("CARGO_CRATE_NAME")).into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .init();
 
     let oauth_client_id = env::var("OAUTH_CLIENT_ID").expect("Missing OAUTH_CLIENT_ID");
     let oauth_client_secret = env::var("OAUTH_CLIENT_SECRET").expect("Missing OAUTH_CLIENT_SECRET");
-
-    let redirect_url = RedirectUrl::new(AUTH_REDIRECT_URL.to_string()).unwrap();
-    let auth_url = AuthUrl::new(OAUTH_BASE_URL.to_string()).unwrap();
-    let token_url = TokenUrl::new(OAUTH_TOKEN_URL.to_string()).unwrap();
-
-    let oauth_client = BasicClient::new(
-        ClientId::new(oauth_client_id.clone()),
-        Some(ClientSecret::new(oauth_client_secret.clone())),
-        auth_url,
-        Some(token_url),
-    )
-    .set_redirect_uri(redirect_url);
-    info!("initialized oauth client");
 
     let db_connstr = env::var("DB_CONNSTR").expect("Missing DB_CONNSTR");
     let mut roots = rustls::RootCertStore::empty();
@@ -103,23 +90,20 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     });
-    info!("connected to DB");
+    info!("connected to database");
 
-    let state = Arc::new(AppState {
+    let state = InnerState {
         db_client,
         cookie_jar_key: Key::generate(),
-        oauth_client,
         oauth_client_id,
         oauth_client_secret,
-    });
-    let state = State { state };
-
+    };
     let router = axum::Router::new()
         .route("/", get(index).post(shorten))
         .route("/authorize", get(authorize))
         .route(AUTHORIZED_ROUTE, get(authorized))
         .route("/{short_url}", get(redirect))
-        .with_state(state);
+        .with_state(State { 0: Arc::new(state) });
     let listener = tokio::net::TcpListener::bind(SOCKET)
         .await
         .expect("failed to bind TcpListener");
@@ -139,15 +123,14 @@ impl axum::extract::OptionalFromRequestParts<State> for UserId {
         parts: &mut axum::http::request::Parts,
         state: &State,
     ) -> Result<Option<Self>, Self::Rejection> {
-        let jar: PrivateCookieJar =
-            PrivateCookieJar::from_request_parts(parts, state.state.as_ref())
-                .await
-                .unwrap(); // infallible
+        let jar: PrivateCookieJar = PrivateCookieJar::from_request_parts(parts, state)
+            .await
+            .unwrap(); // infallible
         let Some(session_id) = jar.get(COOKIE_SID).map(|cookie| cookie.value().to_owned()) else {
             return Ok(None);
         };
 
-        let client = &state.state.db_client;
+        let client = &state.db_client;
         let query = client
             .query_opt(
                 "SELECT user_id FROM sessions WHERE session_id = $1",
@@ -211,7 +194,7 @@ async fn index(user: Option<UserId>) -> Html<String> {
 }
 
 async fn shorten(
-    state: AxumState<State>,
+    state: AxumState,
     user: Option<UserId>,
     Form(LongUrl { url }): Form<LongUrl>,
 ) -> Response {
@@ -225,9 +208,8 @@ async fn shorten(
 
     let mut short_url = "".to_string();
     for i in 0..20 {
-        short_url = nanoid::nanoid!(6);
+        short_url = nanoid::nanoid!(SHORT_URL_LEN);
         let query = state
-            .state
             .db_client
             .query_opt(
                 "INSERT INTO urls (user_id, short_url, long_url) \
@@ -253,7 +235,7 @@ async fn shorten(
 }
 
 async fn redirect(
-    state: AxumState<State>,
+    state: AxumState,
     user: Option<UserId>,
     Path(short_url): Path<String>,
 ) -> Response {
@@ -263,7 +245,6 @@ async fn redirect(
     };
 
     let query = state
-        .state
         .db_client
         .query_opt(
             "SELECT long_url FROM urls WHERE short_url = $1",
@@ -303,7 +284,7 @@ struct UserInfo {
 fn decode_id_token(id_token: String) -> Option<UserInfo> {
     let id_token = id_token.split(".").skip(1).take(1).collect::<Vec<&str>>();
     let id_token = id_token.get(0)?;
-    let id_token = decode_config(*id_token, base64::STANDARD_NO_PAD).ok()?;
+    let id_token = base64::decode_config(*id_token, base64::STANDARD_NO_PAD).ok()?;
     serde_json::from_slice::<UserInfo>(&id_token).ok()
 }
 
@@ -312,19 +293,27 @@ struct AuthorizeQuery {
     short_url: String,
 }
 
+fn generate_csrf_token(num_bytes: u32) -> String {
+    use rand::{Rng, thread_rng};
+    let random_bytes: Vec<u8> = (0..num_bytes).map(|_| thread_rng().r#gen::<u8>()).collect();
+    base64::encode_config(&random_bytes, base64::URL_SAFE_NO_PAD)
+}
+
 async fn authorize(
-    state: AxumState<State>,
+    state: AxumState,
     jar: PrivateCookieJar,
     Query(AuthorizeQuery { short_url }): Query<AuthorizeQuery>,
 ) -> (PrivateCookieJar, Redirect) {
-    let (auth_url, csrf_token) = state
-        .state
-        .oauth_client
-        .authorize_url(CsrfToken::new_random)
-        .add_scope(Scope::new(
-            "https://www.googleapis.com/auth/userinfo.email".to_string(),
-        ))
-        .url();
+    let csrf_token = generate_csrf_token(16);
+    let client_id = &state.oauth_client_id;
+    let redirect_uri = oauth_redirect_url();
+    let auth_url = format!(
+        "{OAUTH_BASE_URL}?response_type=code\
+        &client_id={client_id}\
+        &state={csrf_token}\
+        &redirect_uri={redirect_uri}\
+        &scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.email"
+    );
 
     let redirect_cookie = Cookie::build((COOKIE_REDIRECT, short_url))
         .path("/")
@@ -334,7 +323,7 @@ async fn authorize(
         .same_site(axum_extra::extract::cookie::SameSite::Lax)
         .http_only(true)
         .build();
-    let csrf_cookie = Cookie::build((COOKIE_CSRF, csrf_token.secret().to_string()))
+    let csrf_cookie = Cookie::build((COOKIE_CSRF, csrf_token))
         .path("/")
         //.TODO secure(true) not true for localhost
         //.domain(COOKIE_DOMAIN)
@@ -348,18 +337,20 @@ async fn authorize(
 }
 
 async fn authorized(
-    state: AxumState<State>,
+    state: AxumState,
     jar: PrivateCookieJar,
     Query(auth_request): Query<AuthRequest>,
 ) -> Result<(PrivateCookieJar, Redirect), Response> {
+    // Oauth .exchange_code() doesn't work with "request failed". Also, we can't get
+    // id token from it, and I don't want to pull in whole openid library just for that
     let params = [
         ("grant_type", "authorization_code"),
-        ("redirect_uri", AUTH_REDIRECT_URL),
+        ("redirect_uri", &oauth_redirect_url()),
         ("code", &auth_request.code),
-        ("client_id", &state.state.oauth_client_id),
-        ("client_secret", &state.state.oauth_client_secret),
+        ("client_id", &state.oauth_client_id),
+        ("client_secret", &state.oauth_client_secret),
     ];
-    let auth_response = ::reqwest::Client::new()
+    let auth_response = reqwest::Client::new()
         .post(OAUTH_TOKEN_URL)
         .form(&params)
         .send()
@@ -398,7 +389,6 @@ async fn authorized(
         .build();
 
     state
-        .state
         .db_client
         .query(
             "WITH user_insert AS (\
