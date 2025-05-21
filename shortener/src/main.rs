@@ -55,6 +55,10 @@ impl FromRef<State> for Key {
     }
 }
 
+// Why not oauth-rs? Oauth .exchange_code() doesn't work with "request failed". Also, we can't get
+// id token from it, and I don't want to pull in whole openid library just for that.
+// Id token saves us a request to openid endpoint and one Oauth scope we don't use
+
 fn oauth_redirect_url() -> String {
     format!("{HOST}{AUTHORIZED_ROUTE}")
 }
@@ -281,11 +285,10 @@ struct UserInfo {
     sub: String,
 }
 
-fn decode_id_token(id_token: String) -> Option<UserInfo> {
-    let id_token = id_token.split(".").skip(1).take(1).collect::<Vec<&str>>();
-    let id_token = id_token.get(0)?;
-    let id_token = base64::decode_config(*id_token, base64::STANDARD_NO_PAD).ok()?;
-    serde_json::from_slice::<UserInfo>(&id_token).ok()
+fn decode_id_token(token: String) -> Option<UserInfo> {
+    let payload = token.split(".").skip(1).take(1).collect::<Vec<&str>>();
+    let decoded = base64::decode_config(payload.get(0)?, base64::STANDARD_NO_PAD).ok()?;
+    serde_json::from_slice::<UserInfo>(&decoded).ok()
 }
 
 #[derive(Deserialize)]
@@ -341,8 +344,6 @@ async fn authorized(
     jar: PrivateCookieJar,
     Query(auth_request): Query<AuthRequest>,
 ) -> Result<(PrivateCookieJar, Redirect), Response> {
-    // Oauth .exchange_code() doesn't work with "request failed". Also, we can't get
-    // id token from it, and I don't want to pull in whole openid library just for that
     let params = [
         ("grant_type", "authorization_code"),
         ("redirect_uri", &oauth_redirect_url()),
