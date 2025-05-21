@@ -127,6 +127,11 @@ impl Row {
         })
     }
 
+    /// Returns the statement without any Arc clones.
+    pub fn into_statement(self) -> Statement {
+        self.statement
+    }
+
     /// Returns information about the columns of data in the row.
     pub fn columns(&self) -> &[Column] {
         self.statement.columns()
@@ -297,5 +302,35 @@ impl SimpleQueryRow {
 
         let buf = self.ranges[idx].clone().map(|r| &self.body.buffer()[r]);
         FromSql::from_sql_nullable(&Type::TEXT, buf).map_err(|e| Error::from_sql(e, idx))
+    }
+}
+
+/// A raw row of data returned from the database by a query.
+pub struct RawRow {
+    output_format: Format,
+    body: DataRowBody,
+}
+
+impl fmt::Debug for RawRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RawRow").finish()
+    }
+}
+
+impl RawRow {
+    pub(crate) fn new(body: DataRowBody, output_format: Format) -> Self {
+        Self {
+            body,
+            output_format,
+        }
+    }
+
+    pub fn parse(self, statement: Statement) -> Result<Row, Error> {
+        Row::new(statement, self.body, self.output_format)
+    }
+
+    /// Row byte size
+    pub fn body_len(&self) -> usize {
+        self.body.buffer().len()
     }
 }

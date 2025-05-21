@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use crate::codec::{BackendMessages, FrontendMessage};
 use crate::config::{Host, SslMode};
 use crate::connection::{Request, RequestMessages};
-use crate::query::RowStream;
+use crate::query::RawRowStream;
 use crate::simple_query::SimpleQueryStream;
 use crate::types::{Oid, Type};
 use crate::{
@@ -151,7 +151,11 @@ impl Client {
 
     /// Pass text directly to the Postgres backend to allow it to sort out typing itself and
     /// to save a roundtrip
-    pub async fn query_raw_txt<S, I>(&self, statement: &str, params: I) -> Result<RowStream, Error>
+    pub async fn query_raw_txt<S, I>(
+        &self,
+        statement: &str,
+        params: I,
+    ) -> Result<RawRowStream, Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = Option<S>>,

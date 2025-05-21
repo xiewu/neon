@@ -2,7 +2,7 @@
 
 use postgres_protocol2::Oid;
 
-use crate::query::RowStream;
+use crate::query::RawRowStream;
 use crate::types::Type;
 use crate::{Client, Error, Transaction};
 
@@ -15,7 +15,7 @@ mod private {
 /// This trait is "sealed", and cannot be implemented outside of this crate.
 pub trait GenericClient: private::Sealed {
     /// Like `Client::query_raw_txt`.
-    async fn query_raw_txt<S, I>(&self, statement: &str, params: I) -> Result<RowStream, Error>
+    async fn query_raw_txt<S, I>(&self, statement: &str, params: I) -> Result<RawRowStream, Error>
     where
         S: AsRef<str> + Sync + Send,
         I: IntoIterator<Item = Option<S>> + Sync + Send,
@@ -28,7 +28,7 @@ pub trait GenericClient: private::Sealed {
 impl private::Sealed for Client {}
 
 impl GenericClient for Client {
-    async fn query_raw_txt<S, I>(&self, statement: &str, params: I) -> Result<RowStream, Error>
+    async fn query_raw_txt<S, I>(&self, statement: &str, params: I) -> Result<RawRowStream, Error>
     where
         S: AsRef<str> + Sync + Send,
         I: IntoIterator<Item = Option<S>> + Sync + Send,
@@ -46,7 +46,7 @@ impl GenericClient for Client {
 impl private::Sealed for Transaction<'_> {}
 
 impl GenericClient for Transaction<'_> {
-    async fn query_raw_txt<S, I>(&self, statement: &str, params: I) -> Result<RowStream, Error>
+    async fn query_raw_txt<S, I>(&self, statement: &str, params: I) -> Result<RawRowStream, Error>
     where
         S: AsRef<str> + Sync + Send,
         I: IntoIterator<Item = Option<S>> + Sync + Send,

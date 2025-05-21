@@ -457,7 +457,15 @@ impl ReportableError for SqlOverHttpError {
             SqlOverHttpError::ConnInfo(e) => e.get_error_kind(),
             SqlOverHttpError::ResponseTooLarge(_) => ErrorKind::User,
             SqlOverHttpError::InvalidIsolationLevel => ErrorKind::User,
-            SqlOverHttpError::Postgres(p) => p.get_error_kind(),
+            // customer initiated SQL errors.
+            SqlOverHttpError::Postgres(p) => {
+                if p.as_db_error().is_some() {
+                    ErrorKind::User
+                } else {
+                    ErrorKind::Compute
+                }
+            }
+            // proxy initiated SQL errors.
             SqlOverHttpError::InternalPostgres(p) => {
                 if p.as_db_error().is_some() {
                     ErrorKind::Service
@@ -465,6 +473,7 @@ impl ReportableError for SqlOverHttpError {
                     ErrorKind::Compute
                 }
             }
+            // postgres returned a bad row format that we couldn't parse.
             SqlOverHttpError::JsonConversion(_) => ErrorKind::Postgres,
             SqlOverHttpError::Cancelled(c) => c.get_error_kind(),
         }
@@ -1092,18 +1101,16 @@ async fn query_to_json<T: GenericClient>(
     let query_start = Instant::now();
 
     let query_params = data.params;
-    let mut row_stream = std::pin::pin!(
-        client
-            .query_raw_txt(&data.query, query_params)
-            .await
-            .map_err(SqlOverHttpError::Postgres)?
-    );
+    let mut row_stream = client
+        .query_raw_txt(&data.query, query_params)
+        .await
+        .map_err(SqlOverHttpError::Postgres)?;
     let query_acknowledged = Instant::now();
 
     // Manually drain the stream into a vector to leave row_stream hanging
     // around to get a command tag. Also check that the response is not too
     // big.
-    let mut rows: Vec<postgres_client::Row> = Vec::new();
+    let mut rows: Vec<postgres_client::RawRow> = Vec::new();
     while let Some(row) = row_stream.next().await {
         let row = row.map_err(SqlOverHttpError::Postgres)?;
         *current_size += row.body_len();
@@ -1118,10 +1125,9 @@ async fn query_to_json<T: GenericClient>(
     }
 
     let query_resp_end = Instant::now();
-    let ready = row_stream.ready_status();
+    let (statement, command_tag, ready) = row_stream.into_inner();
 
     // grab the command tag and number of rows affected
-    let command_tag = row_stream.command_tag().unwrap_or_default();
     let mut command_tag_split = command_tag.split(' ');
     let command_tag_name = command_tag_split.next().unwrap_or_default();
     let command_tag_count = if command_tag_name == "INSERT" {
@@ -1142,11 +1148,11 @@ async fn query_to_json<T: GenericClient>(
         "finished executing query"
     );
 
-    let columns_len = row_stream.columns().len();
+    let columns_len = statement.columns().len();
     let mut fields = Vec::with_capacity(columns_len);
     let mut columns = Vec::with_capacity(columns_len);
 
-    for c in row_stream.columns() {
+    for c in statement.columns() {
         fields.push(json!({
             "name": c.name().to_owned(),
             "dataTypeID": c.type_().oid(),
@@ -1169,16 +1175,21 @@ async fn query_to_json<T: GenericClient>(
     let array_mode = data.array_mode.unwrap_or(parsed_headers.default_array_mode);
 
     // convert rows to JSON
-    let rows = rows
-        .iter()
-        .map(|row| pg_text_row_to_json(row, &columns, parsed_headers.raw_output, array_mode))
-        .collect::<Result<Vec<_>, _>>()?;
+    // TODO(conrad): can we do this without a huge alloc? incrementally?
+    let mut json_rows = Vec::with_capacity(rows.len());
+    let mut statement = statement;
+    for row in rows {
+        let row = row.parse(statement).map_err(SqlOverHttpError::Postgres)?;
+        let json_row = pg_text_row_to_json(&row, &columns, parsed_headers.raw_output, array_mode)?;
+        json_rows.push(json_row);
+        statement = row.into_statement();
+    }
 
     // Resulting JSON format is based on the format of node-postgres result.
     let results = json!({
         "command": command_tag_name.to_string(),
         "rowCount": command_tag_count,
-        "rows": rows,
+        "rows": json_rows,
         "fields": fields,
         "rowAsArray": array_mode,
     });

@@ -16,6 +16,7 @@ use tracing::debug;
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
+use crate::row::RawRow;
 use crate::types::IsNull;
 use crate::{Column, Error, ReadyForQueryStatus, Row, Statement};
 
@@ -62,7 +63,7 @@ pub async fn query_txt<S, I>(
     client: &Arc<InnerClient>,
     query: &str,
     params: I,
-) -> Result<RowStream, Error>
+) -> Result<RawRowStream, Error>
 where
     S: AsRef<str>,
     I: IntoIterator<Item = Option<S>>,
@@ -149,13 +150,12 @@ where
         }
     }
 
-    Ok(RowStream {
+    Ok(RawRowStream {
         statement: Statement::new_anonymous(parameters, columns),
         responses,
         command_tag: None,
         status: ReadyForQueryStatus::Unknown,
         output_format: Format::Text,
-        _p: PhantomPinned,
     })
 }
 
@@ -295,5 +295,52 @@ impl RowStream {
     /// This might be available only after the stream has been exhausted.
     pub fn ready_status(&self) -> ReadyForQueryStatus {
         self.status
+    }
+}
+
+/// A stream of raw table rows.
+pub struct RawRowStream {
+    statement: Statement,
+    responses: Responses,
+    command_tag: Option<String>,
+    output_format: Format,
+    status: ReadyForQueryStatus,
+}
+
+impl Stream for RawRowStream {
+    type Item = Result<RawRow, Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            match ready!(this.responses.poll_next(cx)?) {
+                Message::DataRow(body) => {
+                    return Poll::Ready(Some(Ok(RawRow::new(body, this.output_format))));
+                }
+                Message::EmptyQueryResponse | Message::PortalSuspended => {}
+                Message::CommandComplete(body) => {
+                    if let Ok(tag) = body.tag() {
+                        this.command_tag = Some(tag.to_string());
+                    }
+                }
+                Message::ReadyForQuery(status) => {
+                    this.status = status.into();
+                    return Poll::Ready(None);
+                }
+                _ => return Poll::Ready(Some(Err(Error::unexpected_message()))),
+            }
+        }
+    }
+}
+
+impl RawRowStream {
+    /// Assume the stream is exausted, return the final state.
+    pub fn into_inner(self) -> (Statement, String, ReadyForQueryStatus) {
+        (
+            self.statement,
+            // if the stream has been exhausted, this should be set by postgres.
+            self.command_tag.unwrap_or_default(),
+            self.status,
+        )
     }
 }
