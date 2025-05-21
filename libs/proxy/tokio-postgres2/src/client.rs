@@ -155,7 +155,7 @@ impl Client {
         &self,
         statement: &str,
         params: I,
-    ) -> Result<RawRowStream, Error>
+    ) -> Result<(Statement, RawRowStream), Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = Option<S>>,

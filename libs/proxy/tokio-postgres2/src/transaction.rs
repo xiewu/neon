@@ -3,7 +3,7 @@ use postgres_protocol2::message::frontend;
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
 use crate::query::RawRowStream;
-use crate::{CancelToken, Client, Error, ReadyForQueryStatus};
+use crate::{CancelToken, Client, Error, ReadyForQueryStatus, Statement};
 
 /// A representation of a PostgreSQL database transaction.
 ///
@@ -58,7 +58,7 @@ impl<'a> Transaction<'a> {
         &self,
         statement: &str,
         params: I,
-    ) -> Result<RawRowStream, Error>
+    ) -> Result<(Statement, RawRowStream), Error>
     where
         S: AsRef<str>,
         I: IntoIterator<Item = Option<S>>,

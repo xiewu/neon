@@ -63,7 +63,7 @@ pub async fn query_txt<S, I>(
     client: &Arc<InnerClient>,
     query: &str,
     params: I,
-) -> Result<RawRowStream, Error>
+) -> Result<(Statement, RawRowStream), Error>
 where
     S: AsRef<str>,
     I: IntoIterator<Item = Option<S>>,
@@ -150,13 +150,15 @@ where
         }
     }
 
-    Ok(RawRowStream {
-        statement: Statement::new_anonymous(parameters, columns),
+    let stmt = Statement::new_anonymous(parameters, columns);
+    let stream = RawRowStream {
         responses,
         command_tag: None,
         status: ReadyForQueryStatus::Unknown,
         output_format: Format::Text,
-    })
+    };
+
+    Ok((stmt, stream))
 }
 
 async fn start(client: &InnerClient, buf: Bytes) -> Result<Responses, Error> {
@@ -300,7 +302,6 @@ impl RowStream {
 
 /// A stream of raw table rows.
 pub struct RawRowStream {
-    statement: Statement,
     responses: Responses,
     command_tag: Option<String>,
     output_format: Format,
@@ -335,9 +336,8 @@ impl Stream for RawRowStream {
 
 impl RawRowStream {
     /// Assume the stream is exausted, return the final state.
-    pub fn into_inner(self) -> (Statement, String, ReadyForQueryStatus) {
+    pub fn into_inner(self) -> (String, ReadyForQueryStatus) {
         (
-            self.statement,
             // if the stream has been exhausted, this should be set by postgres.
             self.command_tag.unwrap_or_default(),
             self.status,
